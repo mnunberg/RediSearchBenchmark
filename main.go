@@ -58,6 +58,13 @@ func selectIndex(engine string, hosts []string, partitions int, cmdPrefix string
 	panic("could not find index type " + engine)
 }
 
+func prepareIndex(idx index.Index) {
+	idx.Drop()
+	if err := idx.Create(); err != nil {
+		panic(err)
+	}
+}
+
 func main() {
 
 	hosts := flag.String("hosts", "localhost:6379", "comma separated list of host:port to redis nodes")
@@ -74,6 +81,9 @@ func main() {
 	outfile := flag.String("o", "benchmark.csv", "results output file. set to - for stdout")
 	duration := time.Second * time.Duration(*seconds)
 	cmdPrefix := flag.String("prefix", "FT", "Command prefix for FT module")
+	chunkSize := flag.Int("C", 1000, "Chunk size for loading")
+	limit := flag.Int("n", 10000, "Total number of documents to index")
+	sourceFormat := flag.String("format", "article", "[article|abstract] Type of source format")
 
 	flag.Parse()
 	servers := strings.Split(*hosts, ",")
@@ -100,8 +110,7 @@ func main() {
 
 	// ingest random documents
 	if *random > 0 {
-		idx.Drop()
-		idx.Create()
+		prepareIndex(idx)
 
 		N := 1000
 		gen := synth.NewDocumentGenerator(*random, map[string][2]int{"title": {5, 10}, "body": {10, 20}})
@@ -132,9 +141,16 @@ func main() {
 			ac.Delete()
 		}
 
-		idx.Drop()
-		idx.Create()
-		wr := ingest.NewWikipediaAbstractsReader()
+		var wr ingest.DocumentReader
+		prepareIndex(idx)
+		switch *sourceFormat {
+		case "abstract":
+			wr = ingest.NewWikipediaAbstractsReader()
+		case "article":
+			wr = ingest.NewWikipediaDumpReader()
+		default:
+			panic("Invalid format")
+		}
 
 		if *scoreFile != "" {
 			if err := wr.LoadScores(*scoreFile); err != nil {
@@ -142,8 +158,9 @@ func main() {
 			}
 		}
 
-		if err := ingest.IngestDocuments(*fileName, wr, idx, ac, redisearch.IndexingOptions{NoSave: true,
-			NoOffsetVectors: true}, 1000); err != nil {
+		if err := ingest.IngestDocuments(*fileName, wr, idx, redisearch.IndexingOptions{NoSave: true,
+			NoOffsetVectors: true},
+			ingest.IngestOptions{Concurrency: *conc, ChunkSize: *chunkSize, Limit: *limit}); err != nil {
 			panic(err)
 		}
 

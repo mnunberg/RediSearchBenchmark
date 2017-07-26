@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/RedisLabs/RediSearchBenchmark/index"
@@ -13,10 +12,17 @@ import (
 // DocumentReader implements parsing a data source and yielding documents
 type DocumentReader interface {
 	Read(io.Reader) (<-chan index.Document, error)
+	LoadScores(string) error
+}
+
+type IngestOptions struct {
+	ChunkSize   int
+	Concurrency int
+	Limit       int
 }
 
 // IngestDocuments ingests documents into an index using a DocumentReader
-func IngestDocuments(fileName string, r DocumentReader, idx index.Index, ac index.Autocompleter, opts interface{}, chunk int) error {
+func IngestDocuments(fileName string, r DocumentReader, idx index.Index, opts interface{}, iopts IngestOptions) error {
 
 	// open the file
 	fp, err := os.Open(fileName)
@@ -31,19 +37,23 @@ func IngestDocuments(fileName string, r DocumentReader, idx index.Index, ac inde
 		return err
 	}
 
+	chunk := iopts.ChunkSize
+	if chunk == 0 {
+		chunk = 1000
+	}
+
 	docs := make([]index.Document, chunk*2)
-	terms := make([]index.Suggestion, chunk*2)
 
 	//freqs := map[string]int{}
 	st := time.Now()
 
-	nterms := 0
 	i := 0
 	n := 0
 	dt := 0
 	totalDt := 0
 	doch := make(chan index.Document, 100)
-	for w := 0; w < 400; w++ {
+
+	for w := 0; w < iopts.Concurrency; w++ {
 		go func(doch chan index.Document) {
 			for doc := range doch {
 				if doc.Id != "" {
@@ -53,38 +63,11 @@ func IngestDocuments(fileName string, r DocumentReader, idx index.Index, ac inde
 			}
 		}(doch)
 	}
+
 	for doc := range ch {
 
 		docs[i%chunk] = doc
 
-		if doc.Score > 0 && ac != nil {
-
-			//			words := strings.Fields(strings.ToLower(doc.Properties["body"].(string)))
-			//			for _, w := range words {
-			//				for i := 2; i < len(w) && i < 5; i++ {
-			//					freqs[w[:i]] += 1
-			//				}
-			//			}
-
-			terms[nterms] = index.Suggestion{
-				strings.ToLower(doc.Properties["title"].(string)),
-				float64(doc.Score),
-			}
-			nterms++
-
-			if nterms == chunk {
-
-				//				for k, v := range freqs {
-				//					fmt.Printf("%d %s\n", v, k)
-				//				}
-				//				os.Exit(0)
-				/*if err := ac.AddTerms(terms...); err != nil {
-					return err
-				}*/
-				nterms = 0
-			}
-
-		}
 		if doc.Score == 0 {
 			doc.Score = 0.0000001
 		}
@@ -115,6 +98,10 @@ func IngestDocuments(fileName string, r DocumentReader, idx index.Index, ac inde
 			st = time.Now()
 			n = 0
 			dt = 0
+		}
+
+		if iopts.Limit > 0 && i >= iopts.Limit {
+			return nil
 		}
 	}
 
